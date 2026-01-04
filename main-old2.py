@@ -25,7 +25,6 @@ import base64
 import asyncio
 import re
 import json
-import os
 from datetime import datetime, timedelta
 import logging
 
@@ -1032,8 +1031,6 @@ async def search_patents(request: SearchRequest, progress_callback=None):
         target_countries = ["BR"]
     
     logger.info(f"🚀 Search v27.5-FIXED started: {molecule} | Countries: {target_countries}")
-    
-    groq_key = os.getenv("GROQ_API_KEY")
     
     if progress_callback:
         progress_callback(5, "Initializing search...")
