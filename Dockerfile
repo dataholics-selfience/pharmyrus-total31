@@ -11,8 +11,8 @@ COPY main.py .
 COPY google_patents_crawler.py .
 COPY inpi_crawler.py .
 COPY wipo_crawler.py .
-COPY family_resolver.py .          # NOVO v32.0-FTO
-COPY materialization.py .          # NOVO v32.0-FTO
+COPY family_resolver.py .
+COPY materialization.py .
 COPY merge_logic.py .
 COPY patent_cliff.py .
 COPY celery_app.py .
