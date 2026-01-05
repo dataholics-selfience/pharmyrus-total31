@@ -1,46 +1,51 @@
-# main.py
-
 import os
+import logging
 from fastapi import FastAPI
-from celery.result import AsyncResult
-from celery_app import app as celery_app
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 
+# =========================================
+# CONFIG
+# =========================================
 
-ROLE = os.getenv("ROLE", "api")
+ROLE = os.getenv("ROLE", "api").lower()
+PORT = int(os.getenv("PORT", "8080"))
 
-app = FastAPI(title="Pharmyrus API")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("pharmyrus")
 
+# =========================================
+# FASTAPI APP (somente API)
+# =========================================
 
-class SearchRequest(BaseModel):
-    nome_molecula: str
-    paises_alvo: list[str] = ["BR"]
-    incluir_wo: bool = False
+app = FastAPI(title="Pharmyrus API", version="1.0.0")
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "role": ROLE}
-
-
-@app.post("/search")
-def start_search(req: SearchRequest):
-    task = celery_app.send_task(
-        "pharmyrus.search",
-        args=[req.nome_molecula, req.paises_alvo, req.incluir_wo]
-    )
-
     return {
-        "task_id": task.id,
-        "status": "started"
+        "status": "ok",
+        "role": ROLE
     }
 
 
-@app.get("/status/{task_id}")
-def task_status(task_id: str):
-    task = AsyncResult(task_id, app=celery_app)
+# =========================================
+# API ENDPOINTS
+# =========================================
 
-    return {
-        "state": task.state,
-        "result": task.result if task.ready() else None
-    }
+if ROLE == "api":
+    from tasks import run_search
+
+    @app.post("/search")
+    def search(payload: dict):
+        task = run_search.delay(payload)
+        return {
+            "task_id": task.id,
+            "status": "queued"
+        }
+
+
+# =========================================
+# STARTUP LOG
+# =========================================
+
+logger.info(f"🚀 Starting Pharmyrus with ROLE={ROLE}")
