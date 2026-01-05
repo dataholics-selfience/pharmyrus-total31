@@ -1,145 +1,160 @@
-import asyncio
+import os
 import logging
-from typing import List, Dict, Any, Set
+from typing import List, Dict, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
-# ===== Imports REAIS dos módulos existentes =====
-from wipo_crawler import search_wipo_patents
+from celery_app import celery_app
+from tasks import run_full_patent_search
+
 from google_patents_crawler import google_crawler
-from inpi_crawler import (
-    search_inpi_by_number,
-    search_inpi_by_text
-)
+from inpi_crawler import inpi_crawler
 
-# =================================================
-
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pharmyrus")
 
-app = FastAPI(title="Pharmyrus API", version="v32.1")
+# -----------------------------------------------------------------------------
+# FastAPI App
+# -----------------------------------------------------------------------------
+app = FastAPI(
+    title="Pharmyrus Patent Intelligence API",
+    version="31.0.3",
+    description="Freedom to Operate & Patent Discovery Engine"
+)
 
+# -----------------------------------------------------------------------------
+# ENV VARS (Railway)
+# -----------------------------------------------------------------------------
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    logger.warning("⚠️ GROQ_API_KEY not set")
 
-# =========================
+# -----------------------------------------------------------------------------
 # Models
-# =========================
+# -----------------------------------------------------------------------------
+class PatentSearchRequest(BaseModel):
+    molecule: str
+    brand: Optional[str] = None
+    dev_codes: List[str] = []
+    cas: Optional[str] = None
+    country_target: str = "BR"
+    async_mode: bool = True
 
-class WipoRequest(BaseModel):
-    nome_molecula: str
-    brand_name: str | None = None
-    dev_codes: List[str] | None = []
-    cas: str | None = None
-    target_countries: List[str] | None = ["BR"]
+
+class PatentSearchResponse(BaseModel):
+    task_id: Optional[str] = None
+    status: str
+    message: str
 
 
-# =========================
-# Healthcheck
-# =========================
-
+# -----------------------------------------------------------------------------
+# Healthcheck (CRÍTICO para Railway)
+# -----------------------------------------------------------------------------
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
-# =========================
-# MAIN SEARCH ENDPOINT
-# =========================
-
-@app.post("/search/wipo")
-async def search_wipo_pipeline(req: WipoRequest):
-    """
-    Pipeline:
-    1. WIPO (raiz PCT)
-    2. Google Patents (complemento agressivo)
-    3. INPI (materialização BR, lógica preservada)
-    """
-
-    molecule = req.nome_molecula
-    brand = req.brand_name
-    dev_codes = req.dev_codes or []
-    cas = req.cas
-    target_countries = req.target_countries or ["BR"]
-
-    logger.info(f"🌐 Pipeline start | molecule={molecule}")
-
-    # =====================================================
-    # FASE 1 — WIPO (ROOT)
-    # =====================================================
-    wipo_results = await search_wipo_patents(
-        molecule=molecule,
-        dev_codes=dev_codes,
-        cas=cas,
-        max_results=200,
-        headless=True
-    )
-
-    wipo_wos: Set[str] = {
-        item["wo_number"]
-        for item in wipo_results
-        if item.get("wo_number")
+# -----------------------------------------------------------------------------
+# Root
+# -----------------------------------------------------------------------------
+@app.get("/")
+def root():
+    return {
+        "service": "Pharmyrus",
+        "version": "31.0.3",
+        "status": "running"
     }
 
-    logger.info(f"✅ WIPO: {len(wipo_wos)} WOs encontrados")
 
-    # =====================================================
-    # FASE 2 — GOOGLE PATENTS (COMPLEMENTO)
-    # =====================================================
-    google_new_wos = await google_crawler.search_google_patents(
-        molecule=molecule,
-        brand=brand,
-        dev_codes=dev_codes,
-        cas=cas,
-        existing_wos=wipo_wos
+# -----------------------------------------------------------------------------
+# Main Search Endpoint
+# -----------------------------------------------------------------------------
+@app.post("/search", response_model=PatentSearchResponse)
+async def search_patents(payload: PatentSearchRequest):
+    """
+    Main entry point for patent search
+    Supports sync (debug) and async (Celery) execution
+    """
+
+    if not payload.molecule:
+        raise HTTPException(status_code=400, detail="Molecule is required")
+
+    logger.info("🔎 New patent search request")
+    logger.info(f"   Molecule: {payload.molecule}")
+    logger.info(f"   Brand: {payload.brand}")
+    logger.info(f"   Country target: {payload.country_target}")
+    logger.info(f"   Async: {payload.async_mode}")
+
+    # -------------------------
+    # ASYNC MODE (PRODUCTION)
+    # -------------------------
+    if payload.async_mode:
+        task = celery_app.send_task(
+            "pharmyrus.search",
+            kwargs={
+                "molecule": payload.molecule,
+                "brand": payload.brand,
+                "dev_codes": payload.dev_codes,
+                "cas": payload.cas,
+                "country_target": payload.country_target,
+            }
+        )
+
+        return PatentSearchResponse(
+            task_id=task.id,
+            status="submitted",
+            message="Patent search started asynchronously"
+        )
+
+    # -------------------------
+    # SYNC MODE (DEBUG / DEV)
+    # -------------------------
+    try:
+        results = await run_full_patent_search(
+            molecule=payload.molecule,
+            brand=payload.brand,
+            dev_codes=payload.dev_codes,
+            cas=payload.cas,
+            country_target=payload.country_target,
+            groq_api_key=GROQ_API_KEY
+        )
+
+        return PatentSearchResponse(
+            status="completed",
+            message=f"Search completed with {len(results)} results"
+        )
+
+    except Exception as e:
+        logger.exception("❌ Search failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# -----------------------------------------------------------------------------
+# Direct INPI Endpoint (Opcional, mas útil)
+# -----------------------------------------------------------------------------
+@app.post("/search/inpi")
+async def search_inpi_only(payload: PatentSearchRequest):
+    """
+    Direct INPI search (debug / diagnostics)
+    """
+
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured")
+
+    results = await inpi_crawler.search_inpi(
+        molecule=payload.molecule,
+        brand=payload.brand or "",
+        dev_codes=payload.dev_codes,
+        groq_api_key=GROQ_API_KEY
     )
 
-    all_wos = wipo_wos.union(google_new_wos)
-
-    logger.info(
-        f"🔎 Google Patents: +{len(google_new_wos)} WOs | Total={len(all_wos)}"
-    )
-
-    # =====================================================
-    # FASE 3 — INPI (BR ONLY, LÓGICA PRESERVADA)
-    # =====================================================
-    br_patents = []
-    br_orphans = []
-
-    if "BR" in target_countries:
-        logger.info("🇧🇷 INPI materialization started")
-
-        # A) Busca direta por números BR (se existirem)
-        for wo in all_wos:
-            try:
-                result = await search_inpi_by_number(wo)
-                if result:
-                    br_patents.append(result)
-            except Exception as e:
-                logger.warning(f"INPI number error {wo}: {e}")
-
-        # B) Busca textual PT-BR (Groq)
-        try:
-            text_results = await search_inpi_by_text(
-                molecule=molecule,
-                dev_codes=dev_codes
-            )
-            br_orphans.extend(text_results)
-        except Exception as e:
-            logger.warning(f"INPI text search error: {e}")
-
-    # =====================================================
-    # RESPONSE
-    # =====================================================
     return {
-        "metadata": {
-            "molecule": molecule,
-            "total_wos": len(all_wos),
-            "wipo_wos": len(wipo_wos),
-            "google_new_wos": len(google_new_wos),
-            "target_countries": target_countries
-        },
-        "wipo_patents": wipo_results,
-        "google_new_wos": sorted(list(google_new_wos)),
-        "br_patents": br_patents,
-        "br_orphans": br_orphans
+        "source": "INPI",
+        "count": len(results),
+        "results": results
     }
