@@ -1,50 +1,46 @@
+# main.py
+
 import os
-import logging
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
+from celery.result import AsyncResult
+from celery_app import app as celery_app
 from pydantic import BaseModel
-from typing import List, Optional
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("pharmyrus-api")
-
-app = FastAPI(title="Pharmyrus API", version="1.0.0")
 
 
-# =========================
-# Healthcheck
-# =========================
+ROLE = os.getenv("ROLE", "api")
+
+app = FastAPI(title="Pharmyrus API")
+
+
+class SearchRequest(BaseModel):
+    nome_molecula: str
+    paises_alvo: list[str] = ["BR"]
+    incluir_wo: bool = False
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "role": ROLE}
 
 
-# =========================
-# Request model
-# =========================
-class SearchRequest(BaseModel):
-    molecule: str
-    countries: Optional[List[str]] = ["BR"]
-    include_wipo: bool = False
-
-
-# =========================
-# Search endpoint
-# =========================
 @app.post("/search")
-def search(req: SearchRequest):
-    try:
-        from celery_app import app as celery_app  # IMPORT LAZY
+def start_search(req: SearchRequest):
+    task = celery_app.send_task(
+        "pharmyrus.search",
+        args=[req.nome_molecula, req.paises_alvo, req.incluir_wo]
+    )
 
-        task = celery_app.send_task(
-            "pharmyrus.search",
-            args=[req.molecule, req.countries, req.include_wipo]
-        )
+    return {
+        "task_id": task.id,
+        "status": "started"
+    }
 
-        return {
-            "task_id": task.id,
-            "status": "queued"
-        }
 
-    except Exception as e:
-        logger.exception("Failed to enqueue task")
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/status/{task_id}")
+def task_status(task_id: str):
+    task = AsyncResult(task_id, app=celery_app)
+
+    return {
+        "state": task.state,
+        "result": task.result if task.ready() else None
+    }
