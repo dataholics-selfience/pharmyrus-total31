@@ -28,4 +28,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # Run FastAPI + Celery Worker in same container
 # Railway sets PORT automatically
 CMD sh -c "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} & celery -A celery_app worker --loglevel=info --concurrency=1 -I tasks"
-
