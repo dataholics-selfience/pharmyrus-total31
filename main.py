@@ -1,117 +1,149 @@
-import os
-import logging
-from typing import List, Optional
+"""
+Pharmyrus Main API
+FastAPI entrypoint + core search orchestration
+SAFE for Railway + Celery
+"""
 
-from fastapi import FastAPI, HTTPException
+import os
+import time
+import logging
+from typing import List, Optional, Callable
+
+from fastapi import FastAPI
 from pydantic import BaseModel
 
-# -----------------------------------------------------------------------------
+# -------------------------------------------------
 # Logging
-# -----------------------------------------------------------------------------
+# -------------------------------------------------
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("pharmyrus")
 
-# -----------------------------------------------------------------------------
-# Safe Celery import (NÃO quebra API se Redis não existir)
-# -----------------------------------------------------------------------------
-celery_app = None
-try:
-    from celery_app import app as celery_app
-except Exception as e:
-    logger.warning(f"⚠️ Celery not available at startup: {e}")
+# -------------------------------------------------
+# FastAPI App
+# -------------------------------------------------
 
-# -----------------------------------------------------------------------------
-# Crawlers
-# -----------------------------------------------------------------------------
-from google_patents_crawler import google_crawler
-from inpi_crawler import inpi_crawler
-
-# -----------------------------------------------------------------------------
-# FastAPI
-# -----------------------------------------------------------------------------
 app = FastAPI(
-    title="Pharmyrus Patent Intelligence API",
-    version="31.0.3"
+    title="Pharmyrus API",
+    version="31.0.3",
 )
 
-# -----------------------------------------------------------------------------
-# ENV
-# -----------------------------------------------------------------------------
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# -------------------------------------------------
+# Health Check (Railway-safe)
+# -------------------------------------------------
 
-# -----------------------------------------------------------------------------
-# Models
-# -----------------------------------------------------------------------------
-class PatentSearchRequest(BaseModel):
-    molecule: str
-    brand: Optional[str] = None
-    dev_codes: List[str] = []
-    cas: Optional[str] = None
-    async_mode: bool = True
-
-
-# -----------------------------------------------------------------------------
-# Healthcheck (Railway)
-# -----------------------------------------------------------------------------
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
+# -------------------------------------------------
+# Request Model
+# -------------------------------------------------
 
-# -----------------------------------------------------------------------------
-# Root
-# -----------------------------------------------------------------------------
-@app.get("/")
-def root():
-    return {"status": "running", "service": "pharmyrus"}
+class PatentSearchRequest(BaseModel):
+    nome_molecula: str
+    nome_comercial: Optional[str] = None
+    paises_alvo: List[str] = ["BR"]
+    incluir_wo: bool = False
+    max_results: int = 100
 
+# -------------------------------------------------
+# Core Search Function (USED BY API + CELERY)
+# -------------------------------------------------
 
-# -----------------------------------------------------------------------------
-# Search
-# -----------------------------------------------------------------------------
-@app.post("/search")
-async def search(payload: PatentSearchRequest):
+async def search_patents(
+    request: PatentSearchRequest,
+    progress_callback: Optional[Callable[[int, str], None]] = None
+):
+    """
+    Core orchestration logic.
+    Can be called by:
+    - FastAPI endpoint
+    - Celery background task
+    """
 
-    if not payload.molecule:
-        raise HTTPException(status_code=400, detail="molecule is required")
+    start = time.time()
 
-    # -----------------------------
-    # ASYNC (Celery)
-    # -----------------------------
-    if payload.async_mode:
-        if not celery_app:
-            raise HTTPException(
-                status_code=503,
-                detail="Celery not available (Redis not configured)"
-            )
+    def progress(pct: int, step: str):
+        if progress_callback:
+            progress_callback(pct, step)
+        logger.info(f"[{pct}%] {step}")
 
-        task = celery_app.send_task(
-            "pharmyrus.search",
-            kwargs={
-                "molecule": payload.molecule,
-                "brand": payload.brand,
-                "dev_codes": payload.dev_codes,
-                "cas": payload.cas,
-            }
-        )
+    progress(0, "Initializing search")
 
-        return {
-            "status": "submitted",
-            "task_id": task.id
-        }
-
-    # -----------------------------
-    # SYNC (debug)
-    # -----------------------------
-    results = await inpi_crawler.search_inpi(
-        molecule=payload.molecule,
-        brand=payload.brand or "",
-        dev_codes=payload.dev_codes,
-        groq_api_key=GROQ_API_KEY
-    )
-
-    return {
-        "status": "completed",
-        "count": len(results),
-        "results": results
+    results = {
+        "molecule": request.nome_molecula,
+        "countries": request.paises_alvo,
+        "sources": {},
+        "started_at": start,
     }
+
+    # -------------------------------
+    # Google Patents
+    # -------------------------------
+    try:
+        progress(10, "Searching Google Patents")
+        from google_patents_crawler import search_google_patents
+
+        results["sources"]["google_patents"] = search_google_patents(
+            molecule=request.nome_molecula,
+            countries=request.paises_alvo,
+            max_results=request.max_results,
+        )
+    except Exception as e:
+        logger.exception("Google Patents failed")
+        results["sources"]["google_patents_error"] = str(e)
+
+    # -------------------------------
+    # INPI
+    # -------------------------------
+    try:
+        progress(40, "Searching INPI")
+        from inpi_crawler import search_inpi
+
+        results["sources"]["inpi"] = search_inpi(
+            molecule=request.nome_molecula,
+            countries=request.paises_alvo,
+        )
+    except Exception as e:
+        logger.exception("INPI failed")
+        results["sources"]["inpi_error"] = str(e)
+
+    # -------------------------------
+    # WIPO (optional)
+    # -------------------------------
+    if request.incluir_wo:
+        try:
+            progress(70, "Searching WIPO")
+            from wipo_crawler import search_wipo
+
+            results["sources"]["wipo"] = search_wipo(
+                molecule=request.nome_molecula,
+            )
+        except Exception as e:
+            logger.exception("WIPO failed")
+            results["sources"]["wipo_error"] = str(e)
+
+    progress(90, "Merging results")
+
+    try:
+        from merge_logic import merge_patents
+        results["merged"] = merge_patents(results["sources"])
+    except Exception as e:
+        logger.exception("Merge failed")
+        results["merge_error"] = str(e)
+
+    elapsed = round(time.time() - start, 1)
+    progress(100, f"Completed in {elapsed}s")
+
+    results["elapsed_seconds"] = elapsed
+    return results
+
+# -------------------------------------------------
+# API Endpoint (SYNC trigger)
+# -------------------------------------------------
+
+@app.post("/search")
+async def search_endpoint(request: PatentSearchRequest):
+    logger.info(f"🔍 API search request: {request.nome_molecula}")
+    return await search_patents(request)
