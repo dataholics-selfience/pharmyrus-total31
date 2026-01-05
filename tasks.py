@@ -1,45 +1,41 @@
+# tasks.py
+
 import time
-import logging
-import traceback
 import asyncio
 from celery_app import app
-
-logger = logging.getLogger("pharmyrus-tasks")
+from core.search_engine import search_patents
 
 
 @app.task(bind=True, name="pharmyrus.search")
-def search_task(self, molecule: str, countries: list, include_wipo: bool):
-    start = time.time()
+def search_task(self, molecule, countries=None, include_wipo=False):
+    start_time = time.time()
+
+    class TaskRequest:
+        def __init__(self):
+            self.nome_molecula = molecule
+            self.nome_comercial = None
+            self.paises_alvo = countries or ["BR"]
+            self.incluir_wo = include_wipo
+            self.max_results = 100
+
+    request = TaskRequest()
+
+    def progress_callback(progress, step):
+        self.update_state(
+            state="PROGRESS",
+            meta={
+                "progress": progress,
+                "step": step,
+                "elapsed": round(time.time() - start_time, 1)
+            }
+        )
 
     try:
-        def progress(pct, step):
-            self.update_state(
-                state="PROGRESS",
-                meta={
-                    "progress": pct,
-                    "step": step,
-                    "elapsed": round(time.time() - start, 1),
-                },
-            )
-
-        from main import search_patents  # IMPORT CONTROLADO
-
-        progress(5, "Starting search")
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        result = loop.run_until_complete(
-            search_patents(
-                molecule=molecule,
-                countries=countries,
-                include_wipo=include_wipo,
-                progress_callback=progress,
-            )
-        )
-
-        progress(100, "Completed")
-        return result
-
-    except Exception as e:
-        logger.error(traceback.format_exc())
-        raise e
+    return loop.run_until_complete(
+        search_patents(request, progress_callback)
+    )
