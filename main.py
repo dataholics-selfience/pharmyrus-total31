@@ -38,10 +38,6 @@ from inpi_crawler import inpi_crawler
 # Import WIPO Crawler Layer 5 (NOVO v32.0)
 from wipo_crawler import search_wipo_patents
 
-# Import FTO Architecture (v32.0-FTO)
-from family_resolver import merge_family_members, extract_country_candidates
-from materialization import generate_url
-
 # Import Merge Logic
 from merge_logic import merge_br_patents
 
@@ -135,9 +131,9 @@ COUNTRY_CODES = {
 }
 
 app = FastAPI(
-    title="Pharmyrus v32.0-FTO-WIPO-FIRST",
-    description="FTO-First Architecture: WIPO→EPO→Google→INPI with target_countries materialization",
-    version="v32.0-FTO-WIPO-FIRST"
+    title="Pharmyrus v32.0-WIPO-MINIMAL",
+    description="4-Layer Patent Search: WIPO (optional) + EPO OPS + Google Patents + INPI (Minimal changes, WIPO added before EPO)",
+    version="v32.0-WIPO-MINIMAL"
 )
 
 app.add_middleware(
@@ -1033,26 +1029,26 @@ async def search_patents(request: SearchRequest, progress_callback=None):
     
     logger.info(f"🚀 Search v27.5-FIXED started: {molecule} | Countries: {target_countries}")
     
-    groq_key = os.getenv("GROQ_API_KEY")
-    
     if progress_callback:
         progress_callback(5, "Initializing search...")
     
     async with httpx.AsyncClient() as client:
         pubchem = await get_pubchem_data(client, molecule)
-        logger.info(f"PubChem: {len(pubchem['dev_codes'])} dev codes, CAS: {pubchem['cas']}")
+        logger.info(f"   PubChem: {len(pubchem['dev_codes'])} dev codes, CAS: {pubchem['cas']}")
         
         wipo_wos = set()
-        wipo_wos_data = []
         
+        # ===== LAYER 0.5: WIPO (OPCIONAL) =====
         if request.incluir_wo:
             if progress_callback:
-                progress_callback(5, "Searching WIPO PCT...")
+                progress_callback(8, "Searching WIPO PCT...")
             
-            logger.info("🌐 FASE 1: WIPO PatentScope (PCT root)")
+            logger.info("🌐 LAYER 0.5: WIPO PatentScope (PCT root)")
+            
+            groq_key = os.getenv("GROQ_API_KEY")
             
             try:
-                wipo_wos_data = await search_wipo_patents(
+                wipo_patents = await search_wipo_patents(
                     molecule=molecule,
                     dev_codes=pubchem["dev_codes"],
                     cas=pubchem["cas"],
@@ -1060,24 +1056,33 @@ async def search_patents(request: SearchRequest, progress_callback=None):
                     groq_api_key=groq_key
                 )
                 
-                wipo_wos = {w['wo_number'] for w in wipo_wos_data if 'wo_number' in w}
+                wipo_wos = {w['wo_number'] for w in wipo_patents if 'wo_number' in w}
                 logger.info(f"   ✅ WIPO: {len(wipo_wos)} WO patents")
                 
                 if progress_callback:
-                    progress_callback(15, f"WIPO: {len(wipo_wos)} WOs found")
+                    progress_callback(10, f"WIPO: {len(wipo_wos)} WOs found")
             except Exception as e:
                 logger.error(f"   ❌ WIPO search failed: {e}")
         else:
             logger.info("   ⏭️  WIPO: Skipped (incluir_wo=False)")
         
+        # ===== LAYER 1: EPO (CÓDIGO COMPLETO v26) =====
         if progress_callback:
-            progress_callback(20, "Enriching via EPO...")
+            progress_callback(12, "Searching EPO OPS...")
         
-        logger.info("🔍 FASE 2: EPO OPS API (family enrichment)")
+        logger.info("🔵 LAYER 1: EPO OPS (FULL)")
         
         token = await get_epo_token(client)
+        
+        if progress_callback:
+            progress_callback(15, "Building EPO queries...")
+        
+        # Queries COMPLETAS
         queries = build_search_queries(molecule, brand, pubchem["dev_codes"], pubchem["cas"])
         logger.info(f"   Executing {len(queries)} EPO queries...")
+        
+        if progress_callback:
+            progress_callback(20, f"Executing {len(queries)} EPO queries...")
         
         epo_wos = set()
         for query in queries:
@@ -1087,11 +1092,22 @@ async def search_patents(request: SearchRequest, progress_callback=None):
         
         logger.info(f"   ✅ EPO text search: {len(epo_wos)} WOs")
         
+        if progress_callback:
+            progress_callback(25, f"Found {len(epo_wos)} WO patents in EPO")
+        
+        # Buscar WOs relacionados via prioridades (CRÍTICO!)
         if epo_wos:
+            if progress_callback:
+                progress_callback(28, "Searching related patents via priorities...")
+            
             related_wos = await search_related_wos(client, token, list(epo_wos)[:10])
             if related_wos:
-                logger.info(f"   ✅ EPO priority: {len(related_wos)} additional WOs")
+                logger.info(f"   ✅ EPO priority search: {len(related_wos)} additional WOs")
                 epo_wos.update(related_wos)
+        
+        # Buscar WOs via citações (CRÍTICO!)
+        if progress_callback:
+            progress_callback(32, "Searching citations...")
         
         key_wos = list(epo_wos)[:5]
         citation_wos = set()
@@ -1102,163 +1118,214 @@ async def search_patents(request: SearchRequest, progress_callback=None):
         
         if citation_wos:
             new_from_citations = citation_wos - epo_wos
-            logger.info(f"   ✅ EPO citations: {len(new_from_citations)} NEW WOs")
+            logger.info(f"   ✅ EPO citation search: {len(new_from_citations)} NEW WOs from citations")
             epo_wos.update(citation_wos)
         
-        all_wos = wipo_wos | epo_wos
-        logger.info(f"   📊 Total WOs (WIPO + EPO): {len(all_wos)}")
-        
-        family_data_epo = {}
-        for i, wo in enumerate(sorted(list(all_wos)[:100])):
-            if i % 20 == 0 and i > 0:
-                logger.info(f"      Processing families {i}/100...")
-            
-            family_members = await get_family_patents(client, token, wo, target_countries)
-            family_data_epo[wo] = family_members
-            await asyncio.sleep(0.3)
-        
-        logger.info(f"   ✅ EPO families: {len(family_data_epo)} WOs enriched")
+        logger.info(f"   ✅ EPO TOTAL: {len(epo_wos)} WOs")
         
         if progress_callback:
-            progress_callback(35, f"EPO: {len(all_wos)} WOs total")
+            progress_callback(35, f"EPO complete: {len(epo_wos)} WO patents found")
         
+        # ===== LAYER 2: GOOGLE PATENTS (AGRESSIVO) =====
         if progress_callback:
-            progress_callback(40, "Validating via Google...")
+            progress_callback(40, "Searching Google Patents...")
         
-        logger.info("🔍 FASE 3: Google Patents (validation)")
+        logger.info("🟢 LAYER 2: Google Patents (AGGRESSIVE)")
         
-        google_wos = await google_crawler.search_google_patents(
+        google_wos = await google_crawler.enrich_with_google(
             molecule=molecule,
             brand=brand,
             dev_codes=pubchem["dev_codes"],
-            max_results=50,
-            progress_callback=lambda s: progress_callback(40, f"Google: {s}") if progress_callback else None
+            cas=pubchem["cas"],
+            epo_wos=epo_wos
         )
         
-        google_wo_set = set(google_wos)
-        all_wos = all_wos | google_wo_set
-        logger.info(f"   ✅ Google: {len(google_wo_set)} WOs")
-        logger.info(f"   📊 Total: {len(all_wos)} WOs")
+        logger.info(f"   ✅ Google found: {len(google_wos)} NEW WOs")
         
         if progress_callback:
-            progress_callback(50, f"Google: {len(all_wos)} total WOs")
+            progress_callback(55, f"Google complete: {len(google_wos)} additional WOs")
+        
+        # Merge WOs
+        all_wos = wipo_wos | epo_wos | google_wos
+        logger.info(f"   ✅ Total WOs (EPO + Google): {len(all_wos)}")
+        
+        # ===== LAYER 3: INPI BRAZILIAN PATENTS =====
+        if progress_callback:
+            progress_callback(60, "Searching INPI (Brazilian patents)...")
+        
+        logger.info("🇧🇷 LAYER 3: INPI Brazilian Patent Office")
+        
+        # Get Groq API key from environment (user needs to set this in Railway!)
+        import os
+        groq_key = os.getenv("GROQ_API_KEY", "")
+        if not groq_key:
+            logger.warning("   ⚠️  GROQ_API_KEY not set! Skipping INPI search")
+            logger.warning("   💡 Set GROQ_API_KEY environment variable in Railway")
+            inpi_patents = []
+        else:
+            # Buscar BRs diretamente no INPI
+            inpi_patents = await inpi_crawler.search_inpi(
+                molecule=molecule,
+                brand=brand,
+                dev_codes=pubchem["dev_codes"],
+                groq_api_key=groq_key
+            )
+        
+        logger.info(f"   ✅ INPI found: {len(inpi_patents)} BR patents")
         
         if progress_callback:
-            progress_callback(55, "Consolidating families...")
+            progress_callback(70, f"INPI complete: {len(inpi_patents)} BR patents found")
         
-        logger.info("🔀 FASE 4: Family consolidation")
-        
-        family_data_consolidated = {}
-        for wo in all_wos:
-            epo_families = family_data_epo.get(wo, {})
-            family_data_consolidated[wo] = epo_families
-        
-        logger.info(f"   ✅ Consolidated: {len(family_data_consolidated)} WOs")
-        
-        if progress_callback:
-            progress_callback(60, f"Filtering for {target_countries}...")
-        
-        logger.info(f"🎯 FASE 5: Filter (target: {target_countries})")
-        
-        candidates_by_country = extract_country_candidates(
-            family_data_consolidated,
-            target_countries
-        )
-        
-        for country, numbers in candidates_by_country.items():
-            logger.info(f"      {country}: {len(numbers)} candidates")
-        
-        if progress_callback:
-            progress_callback(65, "Candidates ready")
-        
-        br_patents_final = []
-        
-        if "BR" in target_countries:
+        # ===== LAYER 5: WIPO PATENTSCOPE (OPCIONAL) =====
+        wipo_patents = []
+        if request.incluir_wo:
             if progress_callback:
-                progress_callback(70, "Materializing BR via INPI...")
+                progress_callback(72, "Searching WIPO PatentScope...")
             
-            logger.info("🇧🇷 FASE 6: INPI Brazil")
+            logger.info("🌐 LAYER 5: WIPO PatentScope (PCT/WO)")
             
-            if not groq_key:
-                logger.warning("   ⚠️  GROQ_API_KEY not set")
-                inpi_patents = []
-            else:
-                inpi_patents = await inpi_crawler.search_inpi(
+            try:
+                wipo_patents = await search_wipo_patents(
                     molecule=molecule,
-                    brand=brand,
                     dev_codes=pubchem["dev_codes"],
-                    groq_api_key=groq_key
-                )
-            
-            logger.info(f"   ✅ INPI direct+text: {len(inpi_patents)} BR patents")
-            
-            if progress_callback:
-                progress_callback(80, f"INPI: {len(inpi_patents)} BR patents")
-            
-            br_numbers_from_families = candidates_by_country.get("BR", [])
-            logger.info(f"   📋 BR candidates from families: {len(br_numbers_from_families)}")
-            
-            br_patents_from_epo = []
-            for number in br_numbers_from_families:
-                br_patents_from_epo.append({"patent_number": number, "source": "EPO"})
-            
-            br_patents_merged = merge_br_patents(br_patents_from_epo, inpi_patents)
-            
-            logger.info(f"   EPO BRs: {len(br_patents_from_epo)}")
-            logger.info(f"   INPI direct: {len(inpi_patents)}")
-            logger.info(f"   → Merged unique: {len(br_patents_merged)}")
-            
-            if progress_callback:
-                progress_callback(82, "Enriching BR patents with INPI data...")
-            
-            logger.info("🔍 INPI ENRICHMENT - Complete BR data")
-            
-            inpi_enriched = []
-            br_numbers_to_enrich = []
-            
-            for patent in br_patents_merged:
-                br_num = patent.get("patent_number")
-                has_complete_data = (
-                    patent.get("source") == "INPI" and
-                    patent.get("title") and
-                    patent.get("abstract")
+                    cas=pubchem["cas"],
+                    max_results=50,  # Limit WIPO
+                    groq_api_key=groq_key,
+                    progress_callback=lambda p, s: progress_callback(
+                        72 + int(p/10), f"WIPO: {s}"
+                    ) if progress_callback else None
                 )
                 
-                if not has_complete_data and br_num:
-                    br_numbers_to_enrich.append(br_num)
-            
-            logger.info(f"   📊 Total BRs: {len(br_patents_merged)}")
-            logger.info(f"   📊 BRs needing enrichment: {len(br_numbers_to_enrich)}")
-            
-            if br_numbers_to_enrich and groq_key:
-                BATCH_SIZE = 5
-                batches = [br_numbers_to_enrich[i:i+BATCH_SIZE] for i in range(0, len(br_numbers_to_enrich), BATCH_SIZE)]
+                # Extract WO numbers from WIPO results
+                wipo_wos = {w['wo_number'] for w in wipo_patents if 'wo_number' in w}
                 
-                for batch_idx, batch in enumerate(batches, 1):
-                    try:
-                        if progress_callback:
-                            enrichment_progress = 82 + int((batch_idx / len(batches)) * 8)
-                            progress_callback(enrichment_progress, f"Enriching batch {batch_idx}/{len(batches)}...")
-                        
-                        batch_results = await inpi_crawler.search_by_numbers(
-                            batch,
-                            username="dnm48",
-                            password=INPI_PASSWORD
-                        )
-                        
-                        if batch_results:
-                            inpi_enriched.extend(batch_results)
-                        
-                        if batch_idx < len(batches):
-                            await asyncio.sleep(3)
-                    except Exception as e:
-                        logger.error(f"      ❌ Error in batch {batch_idx}: {e}")
-                        continue
+                logger.info(f"   ✅ WIPO found: {len(wipo_wos)} WO patents with full data")
                 
-                logger.info(f"   ✅ INPI Enrichment: {len(inpi_enriched)}/{len(br_numbers_to_enrich)} BRs")
+                # Merge with existing WOs
+                all_wos = all_wos | wipo_wos
+                
+                if progress_callback:
+                    progress_callback(80, f"WIPO complete: {len(wipo_wos)} WO patents")
+                    
+            except Exception as e:
+                logger.error(f"   ❌ WIPO search failed: {e}")
+                logger.warning("   Continuing without WIPO data...")
+        else:
+            logger.info("🌐 LAYER 5: WIPO PatentScope - SKIPPED (incluir_wo=False)")
+        
+        # Get BR numbers from EPO families
+        if progress_callback:
+            progress_callback(82, "Getting BR families from EPO...")
+        
+        logger.info("🔍 LAYER 3b: Getting BR families from EPO")
+        br_patents_from_epo = []
+        for i, wo in enumerate(sorted(list(all_wos)[:100])):  # Limit to 100 WOs
+            if i % 20 == 0 and i > 0:
+                logger.info(f"   Getting families {i}/100...")
+                if progress_callback:
+                    progress_callback(82 + int(i/100 * 8), f"Processing WO families {i}/100...")
+            family_patents = await get_family_patents(client, token, wo, target_countries)
+            if "BR" in family_patents:
+                br_patents_from_epo.extend(family_patents["BR"])
+            await asyncio.sleep(0.3)
+        
+        br_numbers = [p["patent_number"] for p in br_patents_from_epo]
+        logger.info(f"   ✅ Found {len(br_numbers)} BRs from EPO families")
+        
+        if progress_callback:
+            progress_callback(90, f"Found {len(br_numbers)} BRs from EPO families")
+        
+        # MERGE: EPO BRs + INPI direct (before enrichment)
+        logger.info("🔀 MERGE: Combining BR sources (before INPI enrichment)")
+        all_inpi_direct = inpi_patents  # Only direct search results
+        br_patents_merged = merge_br_patents(br_patents_from_epo, all_inpi_direct)
+        
+        logger.info(f"   EPO BRs: {len(br_patents_from_epo)}")
+        logger.info(f"   INPI direct: {len(inpi_patents)}")
+        logger.info(f"   → Merged unique (before enrichment): {len(br_patents_merged)}")
+        
+        # ============================================================================
+        # LAYER 4: INPI ENRICHMENT - Enrich all BRs with complete INPI data
+        # ============================================================================
+        if progress_callback:
+            progress_callback(82, "Enriching BR patents with INPI data...")
+        
+        logger.info("")
+        logger.info("=" * 100)
+        logger.info("🔍 LAYER 4: INPI ENRICHMENT - Complete BR data from INPI")
+        logger.info("=" * 100)
+        
+        inpi_enriched = []
+        
+        # Get all unique BR numbers that need enrichment
+        br_numbers_to_enrich = []
+        for patent in br_patents_merged:
+            br_num = patent.get("patent_number")
             
-            if progress_callback:
-                progress_callback(90, "Building patent families...")
+            # Check if already has complete INPI data
+            has_complete_data = (
+                patent.get("source") == "INPI" and
+                patent.get("title") and
+                patent.get("abstract") and
+                patent.get("applicants") and
+                patent.get("inventors")
+            )
+            
+            if not has_complete_data and br_num:
+                br_numbers_to_enrich.append(br_num)
+        
+        logger.info(f"   📊 Total BRs: {len(br_patents_merged)}")
+        logger.info(f"   📊 BRs needing INPI enrichment: {len(br_numbers_to_enrich)}")
+        
+        if br_numbers_to_enrich and groq_key:
+            # Process in BATCHES to avoid timeout
+            BATCH_SIZE = 5  # Process 5 BRs at a time
+            batches = [br_numbers_to_enrich[i:i+BATCH_SIZE] for i in range(0, len(br_numbers_to_enrich), BATCH_SIZE)]
+            
+            logger.info(f"   🔄 Processing {len(batches)} batches of {BATCH_SIZE} BRs each...")
+            
+            for batch_idx, batch in enumerate(batches, 1):
+                try:
+                    if progress_callback:
+                        enrichment_progress = 82 + int((batch_idx / len(batches)) * 8)
+                        progress_callback(enrichment_progress, f"Enriching BR patents batch {batch_idx}/{len(batches)}...")
+                    
+                    logger.info(f"")
+                    logger.info(f"   📦 Batch {batch_idx}/{len(batches)} ({len(batch)} BRs): {', '.join(batch[:3])}{'...' if len(batch) > 3 else ''}")
+                    
+                    # Search INPI for this batch
+                    batch_results = await inpi_crawler.search_by_numbers(
+                        batch,
+                        username="dnm48",
+                        password=INPI_PASSWORD
+                    )
+                    
+                    if batch_results:
+                        inpi_enriched.extend(batch_results)
+                        logger.info(f"      ✅ Got {len(batch_results)} enriched BRs from batch {batch_idx}")
+                    else:
+                        logger.warning(f"      ⚠️  No results from batch {batch_idx}")
+                    
+                    # Sleep between batches to avoid overloading INPI
+                    if batch_idx < len(batches):
+                        await asyncio.sleep(3)
+                        
+                except Exception as e:
+                    logger.error(f"      ❌ Error in batch {batch_idx}: {e}")
+                    continue
+            
+            logger.info(f"")
+            logger.info(f"   ✅ INPI Enrichment Complete: {len(inpi_enriched)}/{len(br_numbers_to_enrich)} BRs enriched")
+        else:
+            if not groq_key:
+                logger.warning(f"   ⚠️  Groq API key not found - skipping INPI enrichment")
+            else:
+                logger.info(f"   ✅ All BRs already have complete data - skipping enrichment")
+        
+        if progress_callback:
+            progress_callback(90, "Building patent families and response...")
+        
+        # FINAL MERGE: Combine everything
         logger.info("")
         logger.info("🔀 FINAL MERGE: Combining all BR data sources")
         all_inpi_data = inpi_patents + inpi_enriched
@@ -1708,7 +1775,7 @@ async def health_check():
     
     return {
         "status": "healthy" if redis_status == "connected" else "degraded",
-        "version": "v32.0-FTO-WIPO-FIRST",
+        "version": "v32.0-WIPO",
         "redis": redis_status,
         "timestamp": datetime.now().isoformat()
     }
@@ -1760,7 +1827,7 @@ async def search_wipo_endpoint(request: SearchRequest):
             "brand_name": request.nome_comercial,
             "search_date": datetime.now().isoformat(),
             "elapsed_seconds": round(elapsed, 2),
-            "version": "v32.0-FTO-WIPO-FIRST",
+            "version": "v32.0-WIPO",
             "source": "WIPO PatentScope only"
         },
         "wipo_patents": wipo_results,
