@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Get Redis URL from Railway environment variable
-redis_url = os.getenv('REDIS_URL')
+redis_url = os.getenv('REDIS_URL') or os.getenv('REDIS_PRIVATE_URL') or os.getenv('REDIS_PUBLIC_URL')
 
 # Debug logging
 if redis_url:
