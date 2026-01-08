@@ -1127,7 +1127,7 @@ async def search_patents(request: SearchRequest, progress_callback=None):
         
         logger.info("🔍 FASE 3: Google Patents (validation)")
         
-        google_wos = await google_crawler.search(
+        google_wos = await google_crawler.search_google_patents(
             molecule=molecule,
             brand=brand,
             dev_codes=pubchem["dev_codes"],
