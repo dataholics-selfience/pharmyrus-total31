@@ -25,7 +25,7 @@ import base64
 import asyncio
 import re
 import json
-import os
+from os import getenv
 from datetime import datetime, timedelta
 import logging
 
@@ -1045,7 +1045,7 @@ async def search_patents(request: SearchRequest, progress_callback=None):
             
             logger.info("🌐 LAYER 0.5: WIPO PatentScope (PCT root)")
             
-            groq_key = os.getenv("GROQ_API_KEY")
+            groq_key = getenv("GROQ_API_KEY")
             
             try:
                 wipo_patents = await search_wipo_patents(
