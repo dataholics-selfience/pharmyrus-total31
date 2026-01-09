@@ -97,6 +97,12 @@ class INPICrawler:
         )
         
         logger.info(f"   📋 {len(search_terms)} search terms generated")
+        
+        # v29.5: DEBUG - Mostrar primeiras 10 queries
+        logger.info("   🔍 v29.5 DEBUG - Primeiras 10 queries:")
+        for idx, term in enumerate(search_terms[:10], 1):
+            logger.info(f"      {idx}. '{term}'")
+        
         logger.info(f"   🔐 Starting INPI search with LOGIN ({username})...")
         
         try:
@@ -147,6 +153,27 @@ class INPICrawler:
                 # STEP 3: Search each term (TÍTULO + RESUMO)
                 for i, term in enumerate(search_terms, 1):
                     logger.info(f"   🔍 INPI search {i}/{len(search_terms)}: '{term}'")
+                    
+                    # v29.4: RE-LOGIN PREVENTIVO a cada 8 buscas!
+                    if i > 1 and (i - 1) % 8 == 0:
+                        logger.info(f"   🔄 Query #{i}: RE-LOGIN preventivo (a cada 8 buscas)")
+                        try:
+                            relogin = await self._login(username, password)
+                            if relogin:
+                                logger.info("   ✅ Re-login preventivo OK!")
+                                self.session_active = True
+                                
+                                # Voltar para página de busca
+                                await self.page.goto(
+                                    "https://busca.inpi.gov.br/pePI/jsp/patentes/PatenteSearchBasico.jsp",
+                                    wait_until='networkidle',
+                                    timeout=180000
+                                )
+                                await asyncio.sleep(2)
+                            else:
+                                logger.warning("   ⚠️  Re-login preventivo falhou, continuando mesmo assim...")
+                        except Exception as e:
+                            logger.warning(f"   ⚠️  Erro no re-login preventivo: {e}, continuando...")
                     
                     try:
                         # Search by TÍTULO
@@ -893,7 +920,10 @@ class INPICrawler:
         """
         Build search terms from molecule, brand, dev codes
         
-        v29.2 ENHANCEMENT: Adiciona queries EN + CAS + mais dev codes
+        v29.4 FIX: 
+        - Molécula PT SEMPRE PRIMEIRA!
+        - Ordem garantida (não usa set)
+        - Re-login a cada 8 buscas
         
         Args:
             molecule: Molecule name (in Portuguese!)
@@ -905,48 +935,55 @@ class INPICrawler:
             cas_number: NOVO - CAS registry number
         
         Returns:
-            List of search terms
+            List of search terms (ORDERED!)
         """
-        terms = set()
+        terms = []  # v29.4: Lista ordenada, NÃO set!
+        seen = set()  # Para deduplicação
         
-        # 1. Molecule PT + EN
+        def add_term(term):
+            """Adiciona termo se ainda não foi adicionado"""
+            if term and term not in seen:
+                terms.append(term.strip())
+                seen.add(term.strip())
+        
+        # 1. MOLÉCULA PT - SEMPRE PRIMEIRA! 🇧🇷
         if molecule:
-            terms.add(molecule.strip())
+            add_term(molecule)
         
-        if molecule_en and molecule_en != molecule:  # NOVO
-            terms.add(molecule_en.strip())
+        # 2. Molécula EN
+        if molecule_en and molecule_en != molecule:
+            add_term(molecule_en)
         
-        # 2. Brand PT + EN
+        # 3. Brand PT
         if brand and brand != molecule:
-            terms.add(brand.strip())
+            add_term(brand)
         
-        if brand_en and brand_en != brand and brand_en != brand:  # NOVO
-            terms.add(brand_en.strip())
+        # 4. Brand EN
+        if brand_en and brand_en != brand and brand_en != molecule:
+            add_term(brand_en)
         
-        # 3. CAS number EXPLÍCITO
-        if cas_number:  # NOVO
-            terms.add(cas_number.strip())
+        # 5. CAS number
+        if cas_number:
+            add_term(cas_number)
         
-        # 4. Dev codes - EXPANDIDO de 6 para 10
-        for code in dev_codes[:10]:  # EXPANDIDO: era 6, agora 10
-            if code and len(code) > 2:  # Only meaningful codes
-                terms.add(code.strip())
+        # 6. Dev codes
+        for code in dev_codes[:10]:
+            if code and len(code) > 2:
+                add_term(code)
                 
-                # NOVO: Variações sem hífen
+                # Variações sem hífen
                 if '-' in code:
-                    terms.add(code.replace('-', '').strip())
+                    add_term(code.replace('-', ''))
         
-        # 5. NOVO: Variações sem espaço
+        # 7. Variações sem espaço
         if molecule_en and ' ' in molecule_en:
-            terms.add(molecule_en.replace(' ', '').strip())
+            add_term(molecule_en.replace(' ', ''))
         
         if molecule and ' ' in molecule:
-            terms.add(molecule.replace(' ', '').strip())
+            add_term(molecule.replace(' ', ''))
         
-        # Convert to list and limit
-        terms_list = list(terms)[:max_terms]  # EXPANDIDO de 8 para 25
-        
-        return terms_list
+        # Limitar
+        return terms[:max_terms]
     
     async def _translate_to_portuguese(
         self,
