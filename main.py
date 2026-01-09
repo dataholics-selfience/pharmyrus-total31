@@ -1142,8 +1142,31 @@ async def search_patents(request: SearchRequest, progress_callback=None):
         
         logger.info(f"   ✅ Google found: {len(google_wos)} NEW WOs")
         
+        # v29.3: COLETAR PATENTES DE TODOS OS PAÍSES!
+        google_patents_by_country = google_crawler.get_all_patents_by_country()
+        
+        logger.info("=" * 100)
+        logger.info("🌍 v29.3: PATENTES POR PAÍS (Google Patents Direct)")
+        logger.info("=" * 100)
+        
+        total_google_direct = 0
+        for country in sorted(google_patents_by_country.keys()):
+            count = len(google_patents_by_country[country])
+            total_google_direct += count
+            logger.info(f"   {country}: {count} patents")
+            
+            # Log primeiras 3 de cada país
+            for patent in google_patents_by_country[country][:3]:
+                logger.info(f"      → {patent['patent_number']} ({patent['url']})")
+            
+            if count > 3:
+                logger.info(f"      ... e mais {count - 3} patentes")
+        
+        logger.info(f"\n   🎯 TOTAL: {total_google_direct} patentes diretas do Google Patents")
+        logger.info("=" * 100)
+        
         if progress_callback:
-            progress_callback(55, f"Google complete: {len(google_wos)} additional WOs")
+            progress_callback(55, f"Google complete: {len(google_wos)} WOs + {total_google_direct} direct patents")
         
         # Merge WOs
         all_wos = wipo_wos | epo_wos | google_wos
@@ -1188,8 +1211,35 @@ async def search_patents(request: SearchRequest, progress_callback=None):
         
         logger.info(f"   ✅ INPI found: {len(inpi_patents)} BR patents")
         
+        # v29.3: MERGE BRs do Google Patents!
+        google_brs = google_patents_by_country.get('BR', [])
+        logger.info(f"   ✅ Google Patents Direct BRs: {len(google_brs)}")
+        
+        # Merge INPI + Google BRs (deduplicate)
+        all_br_numbers = set()
+        all_br_patents = []
+        
+        # Add INPI
+        for inpi_br in inpi_patents:
+            br_num = inpi_br.get('patent_number')
+            if br_num and br_num not in all_br_numbers:
+                all_br_numbers.add(br_num)
+                all_br_patents.append(inpi_br)
+        
+        # Add Google
+        for google_br in google_brs:
+            br_num = google_br.get('patent_number')
+            if br_num and br_num not in all_br_numbers:
+                all_br_numbers.add(br_num)
+                all_br_patents.append(google_br)
+        
+        logger.info(f"   🎯 TOTAL BRs (INPI + Google): {len(all_br_patents)}")
+        logger.info(f"      → INPI: {len(inpi_patents)}")
+        logger.info(f"      → Google Direct: {len(google_brs)}")
+        logger.info(f"      → Unique: {len(all_br_patents)}")
+        
         if progress_callback:
-            progress_callback(70, f"INPI complete: {len(inpi_patents)} BR patents found")
+            progress_callback(70, f"BRs complete: {len(all_br_patents)} total BR patents")
         
         # ===== LAYER 5: WIPO PATENTSCOPE (OPCIONAL) =====
         wipo_patents = []

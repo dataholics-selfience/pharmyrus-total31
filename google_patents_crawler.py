@@ -23,6 +23,7 @@ class GooglePatentsCrawler:
     
     def __init__(self):
         self.found_wos = set()
+        self.found_patents = {}  # v29.3: {'BR': set(), 'US': set(), ...}
         self.proxy_index = 0
     
     def _get_next_proxy(self) -> str:
@@ -40,11 +41,66 @@ class GooglePatentsCrawler:
     ) -> List[str]:
         """
         Constrói TODAS as variações de busca imagináveis
+        v29.3: ADICIONA BUSCAS DIRETAS DE BRs E OUTROS PAÍSES!
+        
         Baseado em: sais, cristais, formulações, síntese, uso terapêutico, enantiômeros
         """
         terms = []
         
-        # 1. BÁSICO - Molecule + patent WO
+        # ============================================================
+        # v29.3: BUSCA DIRETA DE PATENTES NACIONAIS (BRs E OUTROS!)
+        # ============================================================
+        
+        # 1. BRASIL (BR) - BUSCA DIRETA PRIORITÁRIA!
+        terms.append(f'"{molecule}" BR112 site:patents.google.com')
+        terms.append(f'"{molecule}" BRPI site:patents.google.com')
+        terms.append(f'"{molecule}" patent BR')
+        
+        if brand:
+            terms.append(f'"{brand}" BR112 site:patents.google.com')
+            terms.append(f'"{brand}" BRPI site:patents.google.com')
+        
+        # Dev codes + BR
+        for code in dev_codes[:5]:
+            terms.append(f'"{code}" BR112 site:patents.google.com')
+            terms.append(f'"{code}" BRPI site:patents.google.com')
+        
+        # CAS + BR
+        if cas:
+            terms.append(f'"{cas}" BR112 site:patents.google.com')
+            terms.append(f'"{cas}" BRPI site:patents.google.com')
+        
+        # 2. OUTROS PAÍSES IMPORTANTES (BUSCA DIRETA)
+        # US, EP, CN, JP, KR, CA, AU, IN, MX, AR, CL
+        country_prefixes = {
+            'US': ['US', 'US20', 'US10'],
+            'EP': ['EP'],
+            'CN': ['CN'],
+            'JP': ['JP'],
+            'KR': ['KR'],
+            'CA': ['CA'],
+            'AU': ['AU'],
+            'IN': ['IN'],
+            'MX': ['MX'],
+            'AR': ['AR'],
+            'CL': ['CL']
+        }
+        
+        # Busca por país (molecule + top dev codes)
+        for country, prefixes in country_prefixes.items():
+            for prefix in prefixes:
+                terms.append(f'"{molecule}" {prefix} site:patents.google.com')
+        
+        # Top 3 dev codes para países principais
+        for code in dev_codes[:3]:
+            for country in ['US', 'EP', 'CN']:
+                terms.append(f'"{code}" {country} site:patents.google.com')
+        
+        # ============================================================
+        # ORIGINAL: BUSCA DE WOs
+        # ============================================================
+        
+        # 3. BÁSICO - Molecule + patent WO
         terms.append(f'"{molecule}" patent WO')
         terms.append(f'"{molecule}" WO site:patents.google.com')
         
@@ -52,16 +108,16 @@ class GooglePatentsCrawler:
             terms.append(f'"{brand}" patent WO')
             terms.append(f'"{brand}" WO site:patents.google.com')
         
-        # 2. DEV CODES
+        # 4. DEV CODES
         for code in dev_codes[:5]:
             terms.append(f'"{code}" patent WO')
             terms.append(f'"{code}" WO site:patents.google.com')
         
-        # 3. CAS NUMBER
+        # 5. CAS NUMBER
         if cas:
             terms.append(f'"{cas}" patent WO')
         
-        # 4. VARIAÇÕES QUÍMICAS - Sais
+        # 6. VARIAÇÕES QUÍMICAS - Sais
         salt_variants = [
             f'"{molecule}" salt WO',
             f'"{molecule}" hydrochloride WO',
@@ -75,7 +131,7 @@ class GooglePatentsCrawler:
         ]
         terms.extend(salt_variants)
         
-        # 5. CRISTAIS / POLIMORFOS
+        # 7. CRISTAIS / POLIMORFOS
         crystal_variants = [
             f'"{molecule}" crystalline WO',
             f'"{molecule}" crystal form WO',
@@ -88,7 +144,7 @@ class GooglePatentsCrawler:
         ]
         terms.extend(crystal_variants)
         
-        # 6. FORMULAÇÕES
+        # 8. FORMULAÇÕES
         formulation_variants = [
             f'"{molecule}" formulation WO',
             f'"{molecule}" pharmaceutical composition WO',
@@ -237,6 +293,40 @@ class GooglePatentsCrawler:
                                 new_wos.add(wo)
                                 print(f"   ✅ Novo WO: {wo} (via: {term[:50]}...)")
                         
+                        # v29.3: EXTRAIR BRs DIRETAMENTE!
+                        brs_found = re.findall(r'BR\d{12,14}|BRPI\d{7,10}', content)
+                        for br in brs_found:
+                            if br not in self.found_patents.get('BR', set()):
+                                if 'BR' not in self.found_patents:
+                                    self.found_patents['BR'] = set()
+                                self.found_patents['BR'].add(br)
+                                print(f"   ✅ Novo BR DIRETO: {br}")
+                        
+                        # v29.3: EXTRAIR OUTROS PAÍSES!
+                        # US, EP, CN, JP, KR, CA, AU, etc
+                        country_patterns = {
+                            'US': r'US\d{7,11}[A-Z]*\d*',
+                            'EP': r'EP\d{7}[A-Z]*\d*',
+                            'CN': r'CN\d{9}[A-Z]*',
+                            'JP': r'JP\d{10}[A-Z]*|JP[A-Z]\d{7}',
+                            'KR': r'KR\d{11}[A-Z]*',
+                            'CA': r'CA\d{7}[A-Z]*\d*',
+                            'AU': r'AU\d{10}[A-Z]*',
+                            'IN': r'IN\d{9}[A-Z]*',
+                            'MX': r'MX\d{10}[A-Z]*',
+                            'AR': r'AR\d{9}[A-Z]*',
+                            'CL': r'CL\d{9}[A-Z]*'
+                        }
+                        
+                        for country, pattern in country_patterns.items():
+                            patents_found = re.findall(pattern, content)
+                            for patent in patents_found:
+                                if country not in self.found_patents:
+                                    self.found_patents[country] = set()
+                                if patent not in self.found_patents[country]:
+                                    self.found_patents[country].add(patent)
+                                    print(f"   ✅ Novo {country}: {patent}")
+                        
                         # Delay anti-ban
                         await asyncio.sleep(random.uniform(2, 4))
                         
@@ -315,7 +405,44 @@ class GooglePatentsCrawler:
             except Exception as e:
                 print(f"❌ HTTPX FALLBACK também falhou: {e}")
         
+        # v29.3: LOG SUMMARY
+        print(f"\n{'='*60}")
+        print(f"🎯 GOOGLE PATENTS SUMMARY")
+        print(f"{'='*60}")
+        print(f"   WOs descobertos: {len(new_wos)}")
+        for country, patents in sorted(self.found_patents.items()):
+            print(f"   {country} patents: {len(patents)}")
+        print(f"{'='*60}\n")
+        
         return new_wos
+    
+    def get_all_patents_by_country(self) -> Dict[str, List[Dict]]:
+        """
+        v29.3: Retorna TODAS as patentes encontradas por país com URLs
+        
+        Returns:
+            {
+                'BR': [
+                    {'patent_number': 'BR112017027822', 'url': 'https://patents.google.com/patent/BR112017027822'},
+                    ...
+                ],
+                'US': [...],
+                ...
+            }
+        """
+        result = {}
+        
+        for country, patents in self.found_patents.items():
+            result[country] = []
+            for patent in sorted(patents):
+                result[country].append({
+                    'patent_number': patent,
+                    'country': country,
+                    'url': f'https://patents.google.com/patent/{patent}',
+                    'source': 'Google Patents Direct'
+                })
+        
+        return result
     
     async def enrich_with_google(
         self,
