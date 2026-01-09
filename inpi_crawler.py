@@ -85,8 +85,16 @@ class INPICrawler:
         if brand:
             logger.info(f"      Brand: {brand} → {brand_pt}")
         
-        # Build search terms (INCLUINDO brand_pt!)
-        search_terms = self._build_search_terms(molecule_pt, brand_pt, dev_codes, max_terms=10)
+        # Build search terms (INCLUINDO brand_pt + EN + CAS!)
+        search_terms = self._build_search_terms(
+            molecule=molecule_pt,
+            brand=brand_pt,
+            dev_codes=dev_codes,
+            max_terms=25,  # v29.2: expandido
+            molecule_en=molecule,  # v29.2: NOVO
+            brand_en=brand,        # v29.2: NOVO
+            cas_number=dev_codes[0] if dev_codes and dev_codes[0].count('-') == 2 else None  # v29.2: NOVO - tenta extrair CAS
+        )
         
         logger.info(f"   📋 {len(search_terms)} search terms generated")
         logger.info(f"   🔐 Starting INPI search with LOGIN ({username})...")
@@ -877,36 +885,66 @@ class INPICrawler:
         molecule: str,
         brand: str,
         dev_codes: List[str],
-        max_terms: int = 8
+        max_terms: int = 25,  # EXPANDIDO: era 8, agora 25
+        molecule_en: str = None,  # NOVO: molécula em inglês
+        brand_en: str = None,     # NOVO: brand em inglês
+        cas_number: str = None    # NOVO: CAS number
     ) -> List[str]:
         """
         Build search terms from molecule, brand, dev codes
+        
+        v29.2 ENHANCEMENT: Adiciona queries EN + CAS + mais dev codes
         
         Args:
             molecule: Molecule name (in Portuguese!)
             brand: Brand name (in Portuguese!)
             dev_codes: Development codes
             max_terms: Maximum number of terms
+            molecule_en: NOVO - Molecule name in English
+            brand_en: NOVO - Brand name in English
+            cas_number: NOVO - CAS registry number
         
         Returns:
             List of search terms
         """
         terms = set()
         
-        # Add molecule and brand
+        # 1. Molecule PT + EN
         if molecule:
             terms.add(molecule.strip())
         
+        if molecule_en and molecule_en != molecule:  # NOVO
+            terms.add(molecule_en.strip())
+        
+        # 2. Brand PT + EN
         if brand and brand != molecule:
             terms.add(brand.strip())
         
-        # Add dev codes (limit to avoid too many searches)
-        for code in dev_codes[:6]:  # Max 6 dev codes
+        if brand_en and brand_en != brand and brand_en != brand:  # NOVO
+            terms.add(brand_en.strip())
+        
+        # 3. CAS number EXPLÍCITO
+        if cas_number:  # NOVO
+            terms.add(cas_number.strip())
+        
+        # 4. Dev codes - EXPANDIDO de 6 para 10
+        for code in dev_codes[:10]:  # EXPANDIDO: era 6, agora 10
             if code and len(code) > 2:  # Only meaningful codes
                 terms.add(code.strip())
+                
+                # NOVO: Variações sem hífen
+                if '-' in code:
+                    terms.add(code.replace('-', '').strip())
+        
+        # 5. NOVO: Variações sem espaço
+        if molecule_en and ' ' in molecule_en:
+            terms.add(molecule_en.replace(' ', '').strip())
+        
+        if molecule and ' ' in molecule:
+            terms.add(molecule.replace(' ', '').strip())
         
         # Convert to list and limit
-        terms_list = list(terms)[:max_terms]
+        terms_list = list(terms)[:max_terms]  # EXPANDIDO de 8 para 25
         
         return terms_list
     
