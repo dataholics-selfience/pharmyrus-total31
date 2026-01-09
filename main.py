@@ -1036,6 +1036,17 @@ async def search_patents(request: SearchRequest, progress_callback=None):
         pubchem = await get_pubchem_data(client, molecule)
         logger.info(f"   PubChem: {len(pubchem['dev_codes'])} dev codes, CAS: {pubchem['cas']}")
         
+        # v29.6: Se brand não foi fornecido, tentar extrair do PubChem
+        if not brand and pubchem.get('synonyms'):
+            # Procurar por brand name nos sinônimos (geralmente é capitalizado)
+            potential_brands = [
+                syn for syn in pubchem.get('synonyms', [])[:20]  # Primeiros 20
+                if syn and len(syn) < 20 and syn[0].isupper() and syn.lower() != molecule.lower()
+            ]
+            if potential_brands:
+                brand = potential_brands[0]  # Usar primeiro candidato
+                logger.info(f"   🏷️  Brand auto-detected from PubChem: {brand}")
+        
         wipo_wos = set()
         
         # ===== LAYER 0.5: WIPO (OPCIONAL) =====

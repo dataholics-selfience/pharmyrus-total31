@@ -283,17 +283,29 @@ class GooglePatentsCrawler:
                 
                 for i, term in enumerate(priority_terms):
                     try:
-                        # v29.5: Para queries BR, buscar DIRETO no Google Patents!
+                        # v29.6: Para queries BR, buscar DIRETO no Google Patents!
                         if 'BR112' in term or 'BRPI' in term or 'patent BR' in term:
                             # Busca DIRETA no Google Patents (não Google Search!)
                             clean_term = term.replace('site:patents.google.com', '').strip().strip('"')
-                            url = f"https://patents.google.com/?q={clean_term.replace(' ', '+')}&country=BR&num=50"
-                            print(f"   🇧🇷 BUSCA DIRETA BR: {url[:80]}...")
+                            # Remove aspas duplas
+                            clean_term = clean_term.replace('"', '')
+                            url = f"https://patents.google.com/?q={clean_term.replace(' ', '+')}&country=BR&num=100"
+                            print(f"   🇧🇷 BUSCA DIRETA BR: {url[:90]}...")
+                            
+                            await page.goto(url, wait_until='networkidle', timeout=30000)
+                            
+                            # v29.6: AGUARDAR JavaScript carregar resultados!
+                            try:
+                                # Esperar elementos de resultado aparecerem
+                                await page.wait_for_selector('search-result-item, article, .result', timeout=10000)
+                                await asyncio.sleep(3)  # Aguardar renderização completa
+                                print(f"      → Aguardando JavaScript renderizar...")
+                            except:
+                                print(f"      ⚠️  Timeout aguardando JS, usando HTML parcial...")
                         else:
                             # Google Search para WOs (original)
                             url = f"https://www.google.com/search?q={term.replace(' ', '+')}"
-                        
-                        await page.goto(url, wait_until='domcontentloaded', timeout=20000)
+                            await page.goto(url, wait_until='domcontentloaded', timeout=20000)
                         
                         await asyncio.sleep(random.uniform(1, 2))
                         
@@ -308,16 +320,23 @@ class GooglePatentsCrawler:
                                 new_wos.add(wo)
                                 print(f"   ✅ Novo WO: {wo} (via: {term[:50]}...)")
                         
-                        # v29.5: EXTRAIR BRs DIRETAMENTE! (melhor regex)
-                        brs_found = re.findall(r'BR[PI]*\d{10,14}[A-Z]*\d*', content)
-                        for br in brs_found:
-                            if br not in self.found_patents.get('BR', set()):
-                                if 'BR' not in self.found_patents:
-                                    self.found_patents['BR'] = set()
-                                self.found_patents['BR'].add(br)
-                                print(f"   ✅ Novo BR DIRETO: {br}")
+                        # v29.6: EXTRAIR BRs DIRETAMENTE! (múltiplos padrões)
+                        br_patterns = [
+                            r'BR112\d{10}[A-Z]*\d*',  # BR112 + 10 dígitos
+                            r'BRPI\d{7}[A-Z]*\d*',     # BRPI + 7 dígitos  
+                            r'BR\d{12}[A-Z]*\d*',      # BR + 12 dígitos
+                        ]
                         
-                        # v29.5: EXTRAIR OUTROS PAÍSES!
+                        for pattern in br_patterns:
+                            brs_found = re.findall(pattern, content)
+                            for br in brs_found:
+                                if br not in self.found_patents.get('BR', set()):
+                                    if 'BR' not in self.found_patents:
+                                        self.found_patents['BR'] = set()
+                                    self.found_patents['BR'].add(br)
+                                    print(f"   ✅ Novo BR DIRETO: {br}")
+                        
+                        # v29.6: EXTRAIR OUTROS PAÍSES!
                         # US, EP, CN, JP, KR, CA, AU, etc
                         country_patterns = {
                             'US': r'US\d{7,11}[A-Z]*\d*',
