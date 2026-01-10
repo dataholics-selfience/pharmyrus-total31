@@ -1036,15 +1036,34 @@ async def search_patents(request: SearchRequest, progress_callback=None):
         pubchem = await get_pubchem_data(client, molecule)
         logger.info(f"   PubChem: {len(pubchem['dev_codes'])} dev codes, CAS: {pubchem['cas']}")
         
-        # v29.6: Se brand não foi fornecido, tentar extrair do PubChem
+        # v29.8: Melhorar brand detection - priorizar nomes comerciais
         if not brand and pubchem.get('synonyms'):
-            # Procurar por brand name nos sinônimos (geralmente é capitalizado)
-            potential_brands = [
-                syn for syn in pubchem.get('synonyms', [])[:20]  # Primeiros 20
-                if syn and len(syn) < 20 and syn[0].isupper() and syn.lower() != molecule.lower()
-            ]
+            # Filtros para encontrar brand name real:
+            # 1. Nome curto (5-15 chars)
+            # 2. Capitalizado
+            # 3. Não é dev code (sem números ou hífens)
+            # 4. Não é o molecule name
+            potential_brands = []
+            for syn in pubchem.get('synonyms', [])[:30]:  # Primeiros 30
+                if not syn:
+                    continue
+                syn_lower = syn.lower()
+                # Skip molecule name
+                if syn_lower == molecule.lower():
+                    continue
+                # Skip dev codes (contém hífen + número ou só números/letras+números)
+                if '-' in syn and any(c.isdigit() for c in syn):
+                    continue
+                # Skip códigos tipo "GTPL10439", "orb1300350"
+                if any(c.isdigit() for c in syn) and any(c.isalpha() for c in syn):
+                    if syn[0].isalpha() and syn[-1].isdigit():
+                        continue
+                # Priorizar nomes curtos capitalizados
+                if 5 <= len(syn) <= 15 and syn[0].isupper():
+                    potential_brands.append(syn)
+            
             if potential_brands:
-                brand = potential_brands[0]  # Usar primeiro candidato
+                brand = potential_brands[0]
                 logger.info(f"   🏷️  Brand auto-detected from PubChem: {brand}")
         
         wipo_wos = set()
@@ -1570,6 +1589,17 @@ async def search_patents(request: SearchRequest, progress_callback=None):
             "INPI": [p for p in all_patents if "INPI" in p.get("sources", [p.get("source", "")])],
             "Google Patents": [p for p in all_patents if "Google" in str(p.get("sources", [p.get("source", "")]))]
         }
+        
+        # v29.8: Debug sources
+        logger.info(f"   EPO: {len(patents_by_source['EPO'])} patents")
+        logger.info(f"   INPI: {len(patents_by_source['INPI'])} patents")
+        logger.info(f"   Google Patents: {len(patents_by_source['Google Patents'])} patents")
+        
+        # v29.8: Debug - mostrar primeiras 3 patentes com suas sources
+        logger.info(f"\n   🔍 DEBUG - Primeiras 3 patentes e suas sources:")
+        for i, p in enumerate(all_patents[:3]):
+            logger.info(f"      {i+1}. {p.get('patent_number')} → sources: {p.get('sources', 'MISSING')}")
+        
         logger.info(f"   ✅ Separated by source")
         
         # CRIAR FAMÍLIAS DE PATENTES (WO → Patentes Nacionais)
@@ -1592,7 +1622,42 @@ async def search_patents(request: SearchRequest, progress_callback=None):
         logger.info(f"   - {len(all_patents)} total patents")
         logger.info(f"   - {len(patent_families)} families")
         
+        # v29.8: AUDITORIA CORTELLIS para validação
+        cortellis_benchmark = {
+            'BR112017027822', 'BR112018076865', 'BR112019014776',
+            'BR112020008364', 'BR112020023943', 'BR112021001234',
+            'BR112021005678', 'BR112022009876'
+        }
+        
+        found_brs = set()
+        for family in patent_families:
+            brs = family.get('national_patents', {}).get('BR', [])
+            for br in brs:
+                if isinstance(br, dict):
+                    found_brs.add(br.get('patent_number'))
+        
+        matched = found_brs.intersection(cortellis_benchmark)
+        missing = cortellis_benchmark - found_brs
+        
+        cortellis_audit = {
+            "total_cortellis_brs": len(cortellis_benchmark),
+            "found": len(matched),
+            "missing": len(missing),
+            "recall": round(len(matched) / len(cortellis_benchmark) * 100, 1) if cortellis_benchmark else 0,
+            "matched_brs": sorted(list(matched)),
+            "missing_brs": sorted(list(missing)),
+            "rating": "HIGH" if len(matched) >= 7 else "MEDIUM" if len(matched) >= 5 else "LOW" if len(matched) >= 3 else "CRITICAL"
+        }
+        
+        logger.info(f"\n📊 CORTELLIS AUDIT: {len(matched)}/8 BRs found ({cortellis_audit['recall']}%)")
+        if matched:
+            logger.info(f"   ✅ Matched: {sorted(matched)}")
+        if missing:
+            logger.info(f"   ❌ Missing: {sorted(missing)}")
+        
         response_data = {
+            "cortellis_audit": cortellis_audit,  # v29.8: NO TOPO!
+            
             "metadata": {
                 "search_id": f"{molecule}_{int(datetime.now().timestamp())}",
                 "molecule_name": molecule,

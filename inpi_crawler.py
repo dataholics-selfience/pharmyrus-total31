@@ -154,9 +154,9 @@ class INPICrawler:
                 for i, term in enumerate(search_terms, 1):
                     logger.info(f"   🔍 INPI search {i}/{len(search_terms)}: '{term}'")
                     
-                    # v29.6: RE-LOGIN PREVENTIVO a cada 5 buscas! (não 8)
-                    if i > 1 and (i - 1) % 5 == 0:
-                        logger.info(f"   🔄 Query #{i}: RE-LOGIN preventivo (a cada 5 buscas)")
+                    # v29.8: RE-LOGIN PREVENTIVO a cada 4 buscas! (não 5)
+                    if i > 1 and (i - 1) % 4 == 0:
+                        logger.info(f"   🔄 Query #{i}: RE-LOGIN preventivo (a cada 4 buscas)")
                         try:
                             relogin = await self._login(username, password)
                             if relogin:
