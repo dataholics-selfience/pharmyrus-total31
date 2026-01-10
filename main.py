@@ -1314,11 +1314,21 @@ async def search_patents(request: SearchRequest, progress_callback=None):
         # MERGE: EPO BRs + INPI direct (before enrichment)
         logger.info("🔀 MERGE: Combining BR sources (before INPI enrichment)")
         all_inpi_direct = inpi_patents  # Only direct search results
+        
+        # v29.6: INCLUIR Google Direct BRs no merge!
+        all_google_brs = google_patents_by_country.get('BR', [])
+        logger.info(f"   📊 Sources to merge:")
+        logger.info(f"      → EPO: {len(br_patents_from_epo)} BRs")
+        logger.info(f"      → INPI Direct: {len(all_inpi_direct)} BRs")
+        logger.info(f"      → Google Direct: {len(all_google_brs)} BRs")
+        
+        # Merge EPO + INPI primeiro
         br_patents_merged = merge_br_patents(br_patents_from_epo, all_inpi_direct)
         
-        logger.info(f"   EPO BRs: {len(br_patents_from_epo)}")
-        logger.info(f"   INPI direct: {len(inpi_patents)}")
-        logger.info(f"   → Merged unique (before enrichment): {len(br_patents_merged)}")
+        # v29.6: Merge com Google BRs também!
+        br_patents_merged = merge_br_patents(br_patents_merged, all_google_brs)
+        
+        logger.info(f"   → Merged unique (EPO + INPI + Google): {len(br_patents_merged)}")
         
         # ============================================================================
         # LAYER 4: INPI ENRICHMENT - Enrich all BRs with complete INPI data
